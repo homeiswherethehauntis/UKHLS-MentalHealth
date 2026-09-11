@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from math import erfc, sqrt
-from types import SimpleNamespace
-
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 
-from importlib import import_module
-
-config = import_module("00_config")
+import config
 
 
 def p_from_z(z_value: float) -> float:
@@ -33,7 +30,11 @@ def _numeric(df: pd.DataFrame, *candidates: str) -> pd.Series:
 def _strip_wave_prefix(df: pd.DataFrame, wave: str) -> pd.DataFrame:
     prefix = f"{wave}_"
     return df.rename(
-        columns={column: str(column)[len(prefix) :] for column in df if str(column).startswith(prefix)}
+        columns={
+            column: str(column)[len(prefix) :]
+            for column in df
+            if str(column).startswith(prefix)
+        }
     )
 
 
@@ -119,10 +120,17 @@ def read_wave(wave: str) -> pd.DataFrame:
             "sf12pcs_raw": _numeric(df, "sf12pcs_dv", "pcs12"),
             "income_gross_monthly": _numeric(df, "fimngrs_dv"),
             "moved_raw": _numeric(df, "addrmov_dv"),
-            "unsafe_raw": _numeric(df, "unsafe_dv"),
             "child_resp_count": children,
-            "partnered": np.where(partner.isin([2, 3, 10]), 1.0, np.where(partner.notna(), 0.0, np.nan)),
-            "employed": np.where(employment.isin([1, 2]), 1.0, np.where(employment.notna(), 0.0, np.nan)),
+            "partnered": np.where(
+                partner.isin([2, 3, 10]),
+                1.0,
+                np.where(partner.notna(), 0.0, np.nan),
+            ),
+            "employed": np.where(
+                employment.isin([1, 2]),
+                1.0,
+                np.where(employment.notna(), 0.0, np.nan),
+            ),
             "education_group": _numeric(df, "hiqual_dv").apply(_education_group),
         }
     )
@@ -144,19 +152,23 @@ def prepare_analysis_panel() -> pd.DataFrame:
 
     panel["care_intensity"] = panel["aidhrs"].apply(_care_intensity)
     panel["care_mod"] = panel["care_intensity"].eq("Moderate (20-99h)").astype(float)
-    panel["care_high"] = panel["care_intensity"].eq("Very High (>=100h / continuous)").astype(float)
+    panel["care_high"] = (
+        panel["care_intensity"]
+        .eq("Very High (>=100h / continuous)")
+        .astype(float)
+    )
     panel["childcare_yes"] = np.where(
         panel["child_resp_count"].gt(0),
         1.0,
         np.where(panel["child_resp_count"].eq(0), 0.0, np.nan),
     )
     panel["age_sq"] = panel["age"] ** 2
-    panel["log_income"] = np.log1p(panel["income_gross_monthly"].where(panel["income_gross_monthly"].ge(0)))
+    non_negative_income = panel["income_gross_monthly"].where(
+        panel["income_gross_monthly"].ge(0)
+    )
+    panel["log_income"] = np.log1p(non_negative_income)
     panel["moved_since_last_wave"] = np.where(
         panel["moved_raw"].eq(1), 1.0, np.where(panel["moved_raw"].eq(2), 0.0, np.nan)
-    )
-    panel["unsafe_bin"] = np.where(
-        panel["unsafe_raw"].eq(1), 1.0, np.where(panel["unsafe_raw"].notna(), 0.0, np.nan)
     )
     panel["ghq_case_ge4"] = np.where(
         panel["ghq_caseness_score"].ge(4),
@@ -170,10 +182,8 @@ def prepare_analysis_panel() -> pd.DataFrame:
         axis=1, skipna=False
     )
 
-    # These complete-case restrictions reproduce the sample used in the current
-    # manuscript pipeline. Education and perceived safety determine eligibility
-    # because they were required when that panel was originally constructed,
-    # although they are not coefficients in the final primary specification.
+    # Keep the complete-case rule used to define the manuscript sample.
+    # Education determines sample eligibility but is not a primary-model coefficient.
     required = [
         "pidp",
         "ghq12_raw",
@@ -220,61 +230,46 @@ def primary_controls(wave_columns: list[str] | None = None) -> list[str]:
     return controls + (wave_columns or [])
 
 
-def cluster_ols(y: pd.Series, x: pd.DataFrame, groups: pd.Series) -> SimpleNamespace:
-    x = x.loc[:, x.var(numeric_only=True).gt(0)].copy()
-    x.insert(0, "const", 1.0)
-    x_array = x.to_numpy(dtype=float)
-    y_array = y.to_numpy(dtype=float)
-    beta, *_ = np.linalg.lstsq(x_array, y_array, rcond=None)
-    residuals = y_array - x_array @ beta
-    inverse = np.linalg.pinv(x_array.T @ x_array)
-    meat = np.zeros((x_array.shape[1], x_array.shape[1]))
-    group_array = groups.to_numpy()
-    for group in pd.unique(group_array):
-        index = group_array == group
-        score = x_array[index, :].T @ residuals[index]
-        meat += np.outer(score, score)
-    n, k = x_array.shape
-    g = len(pd.unique(group_array))
-    correction = (g / (g - 1)) * ((n - 1) / (n - k)) if g > 1 and n > k else 1.0
-    covariance = correction * inverse @ meat @ inverse
-    return SimpleNamespace(
-        params=pd.Series(beta, index=x.columns),
-        cov_params=lambda: pd.DataFrame(covariance, index=x.columns, columns=x.columns),
+def cluster_ols(
+    y: pd.Series,
+    x: pd.DataFrame,
+    groups: pd.Series,
+    *,
+    add_constant: bool = True,
+):
+    """Fit OLS with standard errors clustered by respondent."""
+    design = x.loc[:, x.var(numeric_only=True).gt(0)].astype(float)
+    if add_constant:
+        design = sm.add_constant(design, has_constant="add")
+    return sm.OLS(y.astype(float), design).fit(
+        cov_type="cluster",
+        cov_kwds={"groups": groups, "use_correction": True},
     )
 
 
-def fit_within(df: pd.DataFrame, outcome: str, design: list[str]) -> tuple[SimpleNamespace, pd.DataFrame]:
+def fit_within(
+    df: pd.DataFrame,
+    outcome: str,
+    design: list[str],
+):
+    """Fit a person fixed-effects model by demeaning within respondents."""
     work = df.dropna(subset=["pidp", outcome, *design]).copy()
-    counts = work.groupby("pidp").size()
-    work = work[work["pidp"].isin(counts[counts.ge(2)].index)].copy()
-    grouped = work.groupby("pidp")
-    y = work[outcome] - grouped[outcome].transform("mean")
-    x = work[design] - grouped[design].transform("mean")
-    x = x.loc[:, x.var().gt(0)]
-    x_array = x.to_numpy(dtype=float)
-    y_array = y.to_numpy(dtype=float)
-    beta, *_ = np.linalg.lstsq(x_array, y_array, rcond=None)
-    residuals = y_array - x_array @ beta
-    inverse = np.linalg.pinv(x_array.T @ x_array)
-    meat = np.zeros((x_array.shape[1], x_array.shape[1]))
-    groups = work["pidp"].to_numpy()
-    for group in pd.unique(groups):
-        index = groups == group
-        score = x_array[index, :].T @ residuals[index]
-        meat += np.outer(score, score)
-    n, k = x_array.shape
-    g = len(pd.unique(groups))
-    correction = (g / (g - 1)) * ((n - 1) / (n - k)) if g > 1 and n > k else 1.0
-    covariance = correction * inverse @ meat @ inverse
-    result = SimpleNamespace(
-        params=pd.Series(beta, index=x.columns),
-        cov_params=lambda: pd.DataFrame(covariance, index=x.columns, columns=x.columns),
+    observations = work.groupby("pidp").size()
+    work = work[work["pidp"].isin(observations[observations.ge(2)].index)].copy()
+
+    person = work.groupby("pidp")
+    demeaned_outcome = work[outcome] - person[outcome].transform("mean")
+    demeaned_design = work[design] - person[design].transform("mean")
+    result = cluster_ols(
+        demeaned_outcome,
+        demeaned_design,
+        work["pidp"],
+        add_constant=False,
     )
     return result, work
 
 
-def linear_combination(result: SimpleNamespace, weights: dict[str, float]) -> dict[str, float]:
+def linear_combination(result, weights: dict[str, float]) -> dict[str, float]:
     names = result.params.index.tolist()
     vector = pd.Series(0.0, index=names)
     missing = [name for name in weights if name not in vector.index]

@@ -6,9 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from importlib import import_module
-
-config = import_module("00_config")
+import config
 
 COLORS = {
     "Total cohesion": "#D7CEE4",
@@ -69,7 +67,9 @@ def clean_axis(ax: plt.Axes, zero: bool = True) -> None:
 
 
 def ci_label(row: pd.Series, digits: int = 2) -> str:
-    return f"{row['estimate']:.{digits}f} ({row['ci_low']:.{digits}f}, {row['ci_high']:.{digits}f})"
+    estimate = f"{row['estimate']:.{digits}f}"
+    interval = f"{row['ci_low']:.{digits}f}, {row['ci_high']:.{digits}f}"
+    return f"{estimate} ({interval})"
 
 
 def forest_three(
@@ -242,4 +242,12 @@ def draw_sensitivity_panel(
 
 
 def add_panel_letter(ax: plt.Axes, letter: str) -> None:
-    ax.text(-0.13, 1.02, letter, transform=ax.transAxes, fontweight="bold", fontsize=10, va="bottom")
+    ax.text(
+        -0.13,
+        1.02,
+        letter,
+        transform=ax.transAxes,
+        fontweight="bold",
+        fontsize=10,
+        va="bottom",
+    )

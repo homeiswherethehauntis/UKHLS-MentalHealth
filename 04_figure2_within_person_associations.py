@@ -4,9 +4,7 @@ import pandas as pd
 
 from analysis_core import fit_within_measure, load_panel, save_model_summary
 from plotting_core import forest_three
-from importlib import import_module
-
-config = import_module("00_config")
+import config
 
 
 def estimate_within_person_associations(panel: pd.DataFrame) -> pd.DataFrame:

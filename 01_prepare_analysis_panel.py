@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-from importlib import import_module
-
 from analysis_core import prepare_analysis_panel
 
-config = import_module("00_config")
+import config
 
 
 def main() -> None:

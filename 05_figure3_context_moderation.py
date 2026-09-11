@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from importlib import import_module
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -23,158 +21,138 @@ from plotting_core import (
     save_figure,
 )
 
-config = import_module("00_config")
+import config
 
 
-def modifier_specification(
-    work: pd.DataFrame, measure: str, modifier: str, wave_columns: list[str]
-) -> tuple[pd.DataFrame, list[str], str, str, list[tuple[str, dict[str, float], dict[str, float] | None]]]:
-    if modifier == "care_intensity":
-        work[f"{measure}_care_mod"] = work[measure] * work["care_mod"]
-        work[f"{measure}_care_high"] = work[measure] * work["care_high"]
-        design = [
-            measure,
-            "care_mod",
-            "care_high",
-            "childcare_yes",
-            f"{measure}_care_mod",
-            f"{measure}_care_high",
-            "age",
-            "log_income",
-            "partnered",
-            "employed",
-            *wave_columns,
-        ]
-        groups = [
-            ("Low (<20h)", {measure: 1.0}, None),
-            (
-                "Moderate (20-99h)",
-                {measure: 1.0, f"{measure}_care_mod": 1.0},
-                {f"{measure}_care_mod": 1.0},
-            ),
-            (
-                "Very High (>=100h / continuous)",
-                {measure: 1.0, f"{measure}_care_high": 1.0},
-                {f"{measure}_care_high": 1.0},
-            ),
-        ]
-        return work, design, "care_intensity", "Low (<20h)", groups
+MODIFIERS = {
+    "care_intensity": {
+        "column": "care_intensity",
+        "groups": [
+            "Low (<20h)",
+            "Moderate (20-99h)",
+            "Very High (>=100h / continuous)",
+        ],
+        "labels": {
+            "Low (<20h)": "Low caregiving\n(Reference group)",
+            "Moderate (20-99h)": "Moderate caregiving",
+            "Very High (>=100h / continuous)": "Very high caregiving",
+        },
+        "remove_controls": {"care_mod", "care_high"},
+    },
+    "childcare": {
+        "column": "childcare_group",
+        "groups": ["No", "Yes"],
+        "labels": {
+            "No": "No childcare responsibility\n(Reference group)",
+            "Yes": "Childcare responsibility",
+        },
+        "remove_controls": {"childcare_yes"},
+    },
+    "employment_status": {
+        "column": "employment_group",
+        "groups": ["Not Employed", "Employed"],
+        "labels": {
+            "Not Employed": "Not employed\n(Reference group)",
+            "Employed": "Employed",
+        },
+        "remove_controls": {"employed"},
+    },
+    "life_stage": {
+        "column": "life_stage",
+        "groups": ["18-34", "35-49", "50-65", "66+"],
+        "labels": {
+            "18-34": "Age 18-34\n(Reference group)",
+            "35-49": "Age 35-49",
+            "50-65": "Age 50-65",
+            "66+": "Age 66+",
+        },
+        "remove_controls": set(),
+    },
+}
 
-    if modifier == "childcare":
-        interaction = f"{measure}_childcare"
-        work[interaction] = work[measure] * work["childcare_yes"]
-        design = [
-            measure,
-            "childcare_yes",
-            interaction,
-            "care_mod",
-            "care_high",
-            "age",
-            "log_income",
-            "partnered",
-            "employed",
-            *wave_columns,
-        ]
-        groups = [
-            ("No", {measure: 1.0}, None),
-            ("Yes", {measure: 1.0, interaction: 1.0}, {interaction: 1.0}),
-        ]
-        return work, design, "childcare_group", "No", groups
 
-    if modifier == "employment_status":
-        interaction = f"{measure}_employed"
-        work[interaction] = work[measure] * work["employed"]
-        design = [
-            measure,
-            "employed",
-            interaction,
-            "care_mod",
-            "care_high",
-            "childcare_yes",
-            "age",
-            "log_income",
-            "partnered",
-            *wave_columns,
-        ]
-        groups = [
-            ("Not Employed", {measure: 1.0}, None),
-            ("Employed", {measure: 1.0, interaction: 1.0}, {interaction: 1.0}),
-        ]
-        return work, design, "employment_group", "Not Employed", groups
-
-    if modifier == "life_stage":
-        work["life_stage"] = pd.cut(
-            work["age"],
-            bins=[18, 35, 50, 66, np.inf],
-            labels=["18-34", "35-49", "50-65", "66+"],
-            right=False,
-        ).astype("string")
-        group_terms = {
-            "35-49": "life_35_49",
-            "50-65": "life_50_65",
-            "66+": "life_66_plus",
-        }
-        for group, term in group_terms.items():
-            work[term] = work["life_stage"].eq(group).astype(float)
-            work[f"{measure}_{term}"] = work[measure] * work[term]
-        design = [
-            measure,
-            *group_terms.values(),
-            *(f"{measure}_{term}" for term in group_terms.values()),
-            "care_mod",
-            "care_high",
-            "childcare_yes",
-            "age",
-            "log_income",
-            "partnered",
-            "employed",
-            *wave_columns,
-        ]
-        groups = [("18-34", {measure: 1.0}, None)]
-        for group, term in group_terms.items():
-            interaction = f"{measure}_{term}"
-            groups.append(
-                (group, {measure: 1.0, interaction: 1.0}, {interaction: 1.0})
-            )
-        return work, design, "life_stage", "18-34", groups
-
-    raise ValueError(f"Unknown modifier: {modifier}")
+def add_context_groups(panel: pd.DataFrame) -> pd.DataFrame:
+    """Create the four caregiving-context variables used in Figure 3."""
+    work = panel.copy()
+    work["childcare_group"] = np.where(work["childcare_yes"].eq(1), "Yes", "No")
+    work["employment_group"] = np.where(
+        work["employed"].eq(1), "Employed", "Not Employed"
+    )
+    work["life_stage"] = pd.cut(
+        work["age"],
+        bins=[18, 35, 50, 66, np.inf],
+        labels=["18-34", "35-49", "50-65", "66+"],
+        right=False,
+    ).astype("string")
+    return work
 
 
 def estimate_context_moderation(panel: pd.DataFrame) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    for domain, label, measure in config.MEASURES:
-        for modifier in ["care_intensity", "childcare", "employment_status", "life_stage"]:
-            work, wave_columns = add_wave_dummies(panel)
-            work["childcare_group"] = np.where(work["childcare_yes"].eq(1), "Yes", "No")
-            work["employment_group"] = np.where(work["employed"].eq(1), "Employed", "Not Employed")
-            work, design, group_column, reference, groups = modifier_specification(
-                work, measure, modifier, wave_columns
-            )
+    """Estimate subgroup associations and differences from each reference group."""
+    panel = add_context_groups(panel)
+    rows = []
+
+    for domain, cohesion_label, measure in config.MEASURES:
+        for modifier, specification in MODIFIERS.items():
+            work, wave_terms = add_wave_dummies(panel)
+            group_column = specification["column"]
+            groups = specification["groups"]
+            reference_group = groups[0]
+
+            group_terms = []
+            interaction_terms = {}
+            for number, group in enumerate(groups[1:], start=1):
+                group_term = f"{modifier}_group_{number}"
+                interaction_term = f"{measure}_{modifier}_{number}"
+                work[group_term] = work[group_column].eq(group).astype(float)
+                work[interaction_term] = work[measure] * work[group_term]
+                group_terms.append(group_term)
+                interaction_terms[group] = interaction_term
+
+            controls = [
+                variable
+                for variable in primary_controls(wave_terms)
+                if variable not in specification["remove_controls"]
+            ]
+            design = [
+                measure,
+                *group_terms,
+                *interaction_terms.values(),
+                *controls,
+            ]
             result, model_data = fit_within(work, "ghq12_raw", design)
-            for group, slope_weights, difference_weights in groups:
+
+            for group in groups:
+                slope_weights = {measure: 1.0}
+                if group != reference_group:
+                    slope_weights[interaction_terms[group]] = 1.0
                 slope = linear_combination(result, slope_weights)
-                difference = (
-                    linear_combination(result, difference_weights)
-                    if difference_weights is not None
-                    else {
+
+                if group == reference_group:
+                    difference = {
                         "estimate": 0.0,
                         "std_error": np.nan,
                         "ci_low": np.nan,
                         "ci_high": np.nan,
                         "p_value": np.nan,
                     }
-                )
-                group_mask = model_data[group_column].astype(str).eq(group)
+                else:
+                    difference = linear_combination(
+                        result, {interaction_terms[group]: 1.0}
+                    )
+
+                group_rows = model_data[group_column].astype(str).eq(group)
                 rows.append(
                     {
                         "domain": domain,
-                        "cohesion": label,
+                        "cohesion": cohesion_label,
                         "modifier": modifier,
                         "group": group,
-                        "reference_group": reference,
-                        "rows": int(group_mask.sum()),
-                        "people": int(model_data.loc[group_mask, "pidp"].nunique()),
+                        "reference_group": reference_group,
+                        "rows": int(group_rows.sum()),
+                        "people": int(
+                            model_data.loc[group_rows, "pidp"].nunique()
+                        ),
                         "slope_estimate": slope["estimate"],
                         "slope_std_error": slope["std_error"],
                         "slope_ci_low": slope["ci_low"],
@@ -187,6 +165,7 @@ def estimate_context_moderation(panel: pd.DataFrame) -> pd.DataFrame:
                         "difference_p_value": difference["p_value"],
                     }
                 )
+
     return pd.DataFrame(rows)
 
 
@@ -195,8 +174,9 @@ def make_figure(results: pd.DataFrame) -> None:
     fig = plt.figure(figsize=(WIDTH_INCHES, 7.3))
     fig.subplots_adjust(left=0.19, right=0.98, bottom=0.13, top=0.98)
     outer = fig.add_gridspec(2, 2, hspace=0.38, wspace=0.34)
-    plot_axes: list[plt.Axes] = []
-    annotation_axes: list[plt.Axes] = []
+
+    plot_axes = []
+    annotation_axes = []
     for row in range(2):
         for column in range(2):
             inner = outer[row, column].subgridspec(
@@ -205,67 +185,20 @@ def make_figure(results: pd.DataFrame) -> None:
             plot_axes.append(fig.add_subplot(inner[0, 0]))
             annotation_axes.append(fig.add_subplot(inner[0, 1]))
 
-    specifications = [
-        (
-            plot_axes[0],
-            annotation_axes[0],
-            "a",
-            "care_intensity",
-            ["Low (<20h)", "Moderate (20-99h)", "Very High (>=100h / continuous)"],
-            {
-                "Low (<20h)": "Low caregiving\n(Reference group)",
-                "Moderate (20-99h)": "Moderate caregiving",
-                "Very High (>=100h / continuous)": "Very high caregiving",
-            },
-        ),
-        (
-            plot_axes[1],
-            annotation_axes[1],
-            "b",
-            "childcare",
-            ["No", "Yes"],
-            {
-                "No": "No childcare responsibility\n(Reference group)",
-                "Yes": "Childcare responsibility",
-            },
-        ),
-        (
-            plot_axes[2],
-            annotation_axes[2],
-            "c",
-            "employment_status",
-            ["Not Employed", "Employed"],
-            {
-                "Not Employed": "Not employed\n(Reference group)",
-                "Employed": "Employed",
-            },
-        ),
-        (
-            plot_axes[3],
-            annotation_axes[3],
-            "d",
-            "life_stage",
-            ["18-34", "35-49", "50-65", "66+"],
-            {
-                "18-34": "Age 18-34\n(Reference group)",
-                "35-49": "Age 35-49",
-                "50-65": "Age 50-65",
-                "66+": "Age 66+",
-            },
-        ),
-    ]
-    for ax, annotation_ax, letter, modifier, groups, labels in specifications:
+    for index, (modifier, specification) in enumerate(MODIFIERS.items()):
         draw_grouped_estimates(
-            ax,
+            plot_axes[index],
             results[results["modifier"].eq(modifier)],
-            groups=groups,
-            labels=labels,
+            groups=specification["groups"],
+            labels=specification["labels"],
             xlim=(-1.75, 0.50),
-            annotation_ax=annotation_ax,
+            annotation_ax=annotation_axes[index],
         )
-        add_panel_letter(ax, letter)
+        add_panel_letter(plot_axes[index], "abcd"[index])
+
     for ax in plot_axes[2:]:
         ax.set_xlabel("Association with GHQ-12 per 1-point higher cohesion")
+
     fig.legend(
         handles=legend_handles(),
         loc="lower left",
@@ -278,7 +211,6 @@ def make_figure(results: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    config.make_output_directories()
     results = estimate_context_moderation(load_panel())
     save_model_summary(results, "figure3_context_moderation.csv")
     results.to_csv(config.SOURCE_DIR / "figure3_context_moderation.csv", index=False)

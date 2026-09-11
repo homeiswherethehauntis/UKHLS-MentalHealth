@@ -3,9 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from analysis_core import load_panel
-from importlib import import_module
-
-config = import_module("00_config")
+import config
 
 
 def summarise_within_person_variation(panel: pd.DataFrame) -> pd.DataFrame:
