@@ -14,7 +14,6 @@ STEPS = [
     "05_figure3_context_moderation.py",
     "06_figure4_sensitivity_analyses.py",
     "07_figure5_temporal_order_checks.py",
-    "08_supplementary_analyses.py",
 ]
 
 
